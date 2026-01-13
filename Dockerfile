@@ -1,58 +1,41 @@
-FROM debian:bookworm-slim
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Asia/Ho_Chi_Minh
-ENV PORT=8080
-
-ENV WIDTH=720
-ENV HEIGHT=1280
-
-ENV RAM_MB=1024
-ENV CPU_CORES=2
-ENV DISK_SIZE=8G
-
-ENV BOOT_FROM_ISO=1
-ENV USE_KVM=0
-
-# Direct ISO (tránh HTML /download)
-ENV ISO_URL="https://downloads.sourceforge.net/project/android-x86/Release%204.4/android-x86-4.4-r5.iso"
-
-# Build: chỉ cài tối thiểu để tránh timeout
-RUN set -eux; \
-  apt-get update; \
-  apt-get install -y --no-install-recommends ca-certificates curl bash tzdata; \
-  rm -rf /var/lib/apt/lists/*; \
-  update-ca-certificates
-
-RUN mkdir -p /data /opt/android
-
-RUN cat > /usr/local/bin/start-android.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "TZ=${TZ} PORT=${PORT}"
-echo "RES=${WIDTH}x${HEIGHT} RAM_MB=${RAM_MB} CPU_CORES=${CPU_CORES}"
-echo "BOOT_FROM_ISO=${BOOT_FROM_ISO} USE_KVM=${USE_KVM}"
+trap 'echo "FATAL: startup failed"; echo "--- qemu.log ---"; tail -200 /var/log/qemu.log 2>/dev/null || true; echo "--------------"; exit 1' ERR
 
-# 1) Runtime install (nặng) - chỉ chạy nếu thiếu qemu/websockify/novnc
+echo "PORT=${PORT} TZ=${TZ}"
+echo "RES=${WIDTH}x${HEIGHT} RAM_MB=${RAM_MB} CPU_CORES=${CPU_CORES}"
+
+mkdir -p /data
+
+# 0) MỞ PORT NGAY (để Railway healthcheck không kill)
+# Cần python3 trong image build (cài nhẹ) hoặc bạn thay bằng busybox httpd nếu có.
+python3 -m http.server "${PORT}" --bind 0.0.0.0 >/tmp/boot-http.log 2>&1 &
+BOOT_HTTP_PID=$!
+echo "Boot HTTP up (pid=${BOOT_HTTP_PID})"
+
+# 1) Runtime install (retry)
 need_install=0
 for bin in qemu-system-x86_64 qemu-img websockify; do
   command -v "$bin" >/dev/null 2>&1 || need_install=1
 done
 
 if [ "$need_install" = "1" ]; then
-  echo "Installing runtime packages (qemu + novnc)..."
-  apt-get update
-  apt-get install -y --no-install-recommends \
-    qemu-system-x86 qemu-utils \
-    xorriso libarchive-tools file \
-    novnc websockify
+  echo "Installing runtime packages..."
+  for i in 1 2 3; do
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      qemu-system-x86 qemu-utils \
+      xorriso libarchive-tools file \
+      novnc websockify \
+    && break || (echo "apt failed attempt $i"; sleep 3)
+  done
   rm -rf /var/lib/apt/lists/*
 fi
 
 ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html 2>/dev/null || true
 
-# 2) Download ISO once (cache in /data)
+# 2) Download ISO (cache)
 if [ ! -f /data/android.iso ]; then
   echo "Downloading ISO..."
   curl -L --retry 8 --retry-delay 2 --connect-timeout 20 --max-time 1200 \
@@ -66,9 +49,8 @@ grep -qi "ISO 9660" /tmp/iso_type.txt
 
 # 3) Patch ISO once (cache)
 if [ ! -f /data/android-patched.iso ]; then
-  echo "Patching ISO for video=${WIDTH}x${HEIGHT}..."
-  rm -rf /tmp/iso-src
-  mkdir -p /tmp/iso-src
+  echo "Patching ISO video=${WIDTH}x${HEIGHT}"
+  rm -rf /tmp/iso-src && mkdir -p /tmp/iso-src
   bsdtar -C /tmp/iso-src -xf /data/android.iso
 
   if [ -f /tmp/iso-src/isolinux/isolinux.cfg ]; then
@@ -89,24 +71,22 @@ if [ ! -f /data/android-patched.iso ]; then
     -b isolinux/isolinux.bin \
     -no-emul-boot -boot-load-size 4 -boot-info-table \
     /tmp/iso-src
-
   rm -rf /tmp/iso-src
 fi
 
 # 4) Create disk
-mkdir -p /data
 if [ ! -f /data/android.qcow2 ]; then
-  echo "Creating disk /data/android.qcow2 (${DISK_SIZE})..."
   qemu-img create -f qcow2 /data/android.qcow2 "${DISK_SIZE}"
 fi
 
-# 5) Start QEMU (VNC on 5900)
+# 5) Stop temporary HTTP, then start real noVNC on same PORT
+kill "${BOOT_HTTP_PID}" 2>/dev/null || true
+echo "Boot HTTP stopped; starting QEMU + noVNC..."
+
+# 6) Start QEMU
 KVM_ARGS=()
 if [ "${USE_KVM}" = "1" ] && [ -e /dev/kvm ]; then
   KVM_ARGS+=( -enable-kvm -cpu host )
-  echo "KVM enabled."
-else
-  echo "KVM not available: software emulation."
 fi
 
 NET_ARGS=( -netdev user,id=n1,hostfwd=tcp::5555-:5555 -device e1000,netdev=n1 )
@@ -120,7 +100,6 @@ if [ "${BOOT_FROM_ISO}" = "1" ]; then
   BOOT_ARGS=( -boot order=d,menu=on )
 fi
 
-echo "Starting QEMU..."
 qemu-system-x86_64 \
   "${KVM_ARGS[@]}" \
   -m "${RAM_MB}" \
@@ -136,9 +115,3 @@ qemu-system-x86_64 \
 
 echo "noVNC: http://0.0.0.0:${PORT}/"
 exec websockify --web=/usr/share/novnc "0.0.0.0:${PORT}" "localhost:5900"
-EOF
-
-RUN chmod +x /usr/local/bin/start-android.sh
-
-EXPOSE 8080 5900 5555
-CMD ["/usr/local/bin/start-android.sh"]
