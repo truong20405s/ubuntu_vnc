@@ -1,5 +1,5 @@
 # Alpine nhỏ, pull nhanh; lưu ý: RAM khi chạy Chromium vẫn là chính
-FROM alpine:3.19
+FROM alpine:3.23
 
 ENV TZ=Asia/Ho_Chi_Minh
 ENV PORT=8080
