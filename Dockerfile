@@ -20,15 +20,18 @@ RUN apk add --no-cache \
     xvfb x11vnc fluxbox \
     dbus xauth xrandr \
     # Fonts (minimal)
-    font-noto font-noto-emoji \
+    font-noto \
     # Browser
     chromium \
-    # noVNC stack
-    py3-numpy py3-websockify novnc \
+    # Python + pip for websockify
+    python3 py3-pip \
+    && pip3 install --no-cache-dir websockify \
     && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime
 
-# Alpine's novnc package stores files in /usr/share/webapps/novnc
-RUN ln -sf /usr/share/webapps/novnc/vnc.html /usr/share/webapps/novnc/index.html || true
+# Tải noVNC từ GitHub (vì Alpine không có package novnc)
+RUN wget -qO- https://github.com/novnc/noVNC/archive/v1.4.0.tar.gz | tar xz -C /opt \
+    && mv /opt/noVNC-1.4.0 /opt/novnc \
+    && ln -sf /opt/novnc/vnc.html /opt/novnc/index.html
 
 # -------------------------------
 # Entrypoint Script
@@ -37,36 +40,30 @@ RUN cat > /usr/local/bin/start-gui.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== Container Info ==="
-echo "OS: Alpine Linux"
-echo "Timezone: ${TZ}"
-echo "Railway PORT: ${PORT}"
-echo "DISPLAY: ${DISPLAY}"
+echo "=== Alpine VNC Container ==="
+echo "PORT: ${PORT} | DISPLAY: ${DISPLAY}"
 
 # Cleanup X11 locks
-rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
+rm -rf /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
 mkdir -p /tmp/.X11-unix
 
-echo "Starting Xvfb (Virtual Display)..."
+echo "[1/4] Starting Xvfb..."
 Xvfb ${DISPLAY} -screen 0 1024x576x16 -nolisten tcp -ac &
 sleep 2
 
-echo "Starting Fluxbox (Window Manager)..."
+echo "[2/4] Starting Fluxbox..."
 fluxbox &
 
-echo "Starting x11vnc (VNC Server)..."
+echo "[3/4] Starting x11vnc..."
 x11vnc -display ${DISPLAY} -forever -shared -rfbport ${VNC_PORT} \
        -nopw -noxrecord -noxfixes -noxdamage -quiet &
 
-echo "Starting noVNC (WebSocket Proxy)..."
-# Alpine path differs from Debian
-websockify --web=/usr/share/webapps/novnc \
-           0.0.0.0:${PORT} localhost:${VNC_PORT} &
+echo "[4/4] Starting noVNC..."
+websockify --web=/opt/novnc 0.0.0.0:${PORT} localhost:${VNC_PORT} &
 
 sleep 3
-echo "Starting Chromium..."
+echo "✓ Chromium starting..."
 
-# Keep Chromium alive with auto-restart
 while true; do
   chromium-browser \
     --no-sandbox \
@@ -75,11 +72,7 @@ while true; do
     --disable-software-rasterizer \
     --disable-extensions \
     --disable-background-networking \
-    --disable-sync \
-    --disable-translate \
-    --disable-features=TranslateUI,BackForwardCache \
     --no-first-run \
-    --no-default-browser-check \
     --window-size=1024,576 \
     about:blank 2>/dev/null || true
   sleep 2
@@ -88,7 +81,4 @@ EOF
 
 RUN chmod +x /usr/local/bin/start-gui.sh
 
-# -------------------------------
-# Launch
-# -------------------------------
 CMD ["/usr/local/bin/start-gui.sh"]
