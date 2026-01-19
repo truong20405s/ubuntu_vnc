@@ -1,69 +1,69 @@
 # ===============================
 #   ALPINE + noVNC + Chromium
-#   Railway Ready (PORT exposed)
+#   Railway Ready (Fully Fixed)
 # ===============================
 FROM alpine:3.19
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Asia/Ho_Chi_Minh
-ENV PORT=8080
-ENV DISPLAY=:99
-ENV VNC_PORT=5900
+ENV TZ=Asia/Ho_Chi_Minh \
+    PORT=8080 \
+    DISPLAY=:99 \
+    VNC_PORT=5900
 
 # -------------------------------
-# Base packages + GUI stack
+# Install packages (single layer)
 # -------------------------------
 RUN apk add --no-cache \
-    # System essentials
-    ca-certificates tzdata bash \
-    # X11 + VNC
-    xvfb x11vnc fluxbox \
-    dbus xauth xrandr \
-    # Fonts (minimal)
-    font-noto \
-    # Browser
-    chromium \
-    # Python + pip for websockify
-    python3 py3-pip \
-    && pip3 install --no-cache-dir websockify \
-    && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime
-
-# Tải noVNC từ GitHub (vì Alpine không có package novnc)
-RUN wget -qO- https://github.com/novnc/noVNC/archive/v1.4.0.tar.gz | tar xz -C /opt \
-    && mv /opt/noVNC-1.4.0 /opt/novnc \
-    && ln -sf /opt/novnc/vnc.html /opt/novnc/index.html
+    ca-certificates tzdata bash curl \
+    xvfb x11vnc fluxbox dbus xauth xrandr \
+    font-noto chromium \
+    python3 py3-numpy && \
+    # Install websockify globally (bypass venv)
+    python3 -m ensurepip && \
+    pip3 install --break-system-packages websockify && \
+    # Download noVNC
+    curl -fsSL https://github.com/novnc/noVNC/archive/v1.4.0.tar.gz | \
+    tar xz -C /opt && \
+    mv /opt/noVNC-1.4.0 /opt/novnc && \
+    ln -sf /opt/novnc/vnc.html /opt/novnc/index.html && \
+    ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime && \
+    # Cleanup
+    rm -rf /var/cache/apk/* /root/.cache
 
 # -------------------------------
-# Entrypoint Script
+# Startup Script
 # -------------------------------
-RUN cat > /usr/local/bin/start-gui.sh <<'EOF'
-#!/usr/bin/env bash
+RUN cat > /start.sh <<'SCRIPT'
+#!/bin/bash
 set -euo pipefail
 
-echo "=== Alpine VNC Container ==="
-echo "PORT: ${PORT} | DISPLAY: ${DISPLAY}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🐧 Alpine VNC Container"
+echo "🌐 Access: http://localhost:${PORT}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# Cleanup X11 locks
-rm -rf /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
+# Clean X11 locks
+rm -rf /tmp/.X* 2>/dev/null || true
 mkdir -p /tmp/.X11-unix
 
-echo "[1/4] Starting Xvfb..."
-Xvfb ${DISPLAY} -screen 0 1024x576x16 -nolisten tcp -ac &
+# Start services
+echo "[1/5] Xvfb..."
+Xvfb ${DISPLAY} -screen 0 1280x720x16 -nolisten tcp -ac &
 sleep 2
 
-echo "[2/4] Starting Fluxbox..."
+echo "[2/5] Fluxbox..."
 fluxbox &
 
-echo "[3/4] Starting x11vnc..."
-x11vnc -display ${DISPLAY} -forever -shared -rfbport ${VNC_PORT} \
-       -nopw -noxrecord -noxfixes -noxdamage -quiet &
+echo "[3/5] x11vnc..."
+x11vnc -display ${DISPLAY} -forever -shared \
+       -rfbport ${VNC_PORT} -nopw -quiet &
 
-echo "[4/4] Starting noVNC..."
+echo "[4/5] websockify..."
 websockify --web=/opt/novnc 0.0.0.0:${PORT} localhost:${VNC_PORT} &
 
 sleep 3
-echo "✓ Chromium starting..."
+echo "[5/5] Chromium..."
 
+# Keep browser alive
 while true; do
   chromium-browser \
     --no-sandbox \
@@ -72,13 +72,21 @@ while true; do
     --disable-software-rasterizer \
     --disable-extensions \
     --disable-background-networking \
+    --disable-sync \
     --no-first-run \
-    --window-size=1024,576 \
+    --window-size=1280,720 \
+    --user-data-dir=/tmp/chrome \
     about:blank 2>/dev/null || true
   sleep 2
 done
-EOF
+SCRIPT
 
-RUN chmod +x /usr/local/bin/start-gui.sh
+RUN chmod +x /start.sh
 
-CMD ["/usr/local/bin/start-gui.sh"]
+# -------------------------------
+# Health check (optional)
+# -------------------------------
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s \
+  CMD curl -f http://localhost:${PORT} || exit 1
+
+CMD ["/start.sh"]
