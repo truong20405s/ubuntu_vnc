@@ -1,87 +1,94 @@
 # ===============================
-#   DEBIAN SLIM + noVNC + Chromium
+#   ALPINE + noVNC + Chromium
 #   Railway Ready (PORT exposed)
 # ===============================
-FROM debian:bookworm-slim
+FROM alpine:3.19
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Ho_Chi_Minh
 ENV PORT=8080
-
 ENV DISPLAY=:99
 ENV VNC_PORT=5900
 
 # -------------------------------
-# Base packages (no recommends)
+# Base packages + GUI stack
 # -------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl tzdata \
-    xvfb fluxbox x11vnc \
-    dbus-x11 xauth x11-xserver-utils \
-    fonts-dejavu \
+RUN apk add --no-cache \
+    # System essentials
+    ca-certificates tzdata bash \
+    # X11 + VNC
+    xvfb x11vnc fluxbox \
+    dbus xauth xrandr \
+    # Fonts (minimal)
+    font-noto font-noto-emoji \
     # Browser
     chromium \
-    # noVNC + websockify
-    novnc websockify \
-    && ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime \
-    && dpkg-reconfigure -f noninteractive tzdata \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    # noVNC stack
+    py3-numpy py3-websockify novnc \
+    && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime
 
-# Debian novnc package thường đặt web ở /usr/share/novnc
-# Tạo index.html cho tiện
-RUN ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html || true
+# Alpine's novnc package stores files in /usr/share/webapps/novnc
+RUN ln -sf /usr/share/webapps/novnc/vnc.html /usr/share/webapps/novnc/index.html || true
 
 # -------------------------------
-# Entrypoint
+# Entrypoint Script
 # -------------------------------
 RUN cat > /usr/local/bin/start-gui.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "=== Container Info ==="
+echo "OS: Alpine Linux"
 echo "Timezone: ${TZ}"
 echo "Railway PORT: ${PORT}"
 echo "DISPLAY: ${DISPLAY}"
 
-rm -f /tmp/.X99-lock || true
-rm -rf /tmp/.X11-unix/X99 || true
+# Cleanup X11 locks
+rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
 mkdir -p /tmp/.X11-unix
 
-echo "Starting Xvfb..."
-# Giảm RAM: hạ resolution + depth 16-bit
+echo "Starting Xvfb (Virtual Display)..."
 Xvfb ${DISPLAY} -screen 0 1024x576x16 -nolisten tcp -ac &
+sleep 2
 
-sleep 1
-echo "Starting window manager (fluxbox)..."
+echo "Starting Fluxbox (Window Manager)..."
 fluxbox &
 
-echo "Starting VNC server..."
-x11vnc -display ${DISPLAY} -forever -shared -rfbport ${VNC_PORT} -nopw -noxrecord -noxfixes -noxdamage &
+echo "Starting x11vnc (VNC Server)..."
+x11vnc -display ${DISPLAY} -forever -shared -rfbport ${VNC_PORT} \
+       -nopw -noxrecord -noxfixes -noxdamage -quiet &
 
-echo "Starting noVNC on 0.0.0.0:${PORT} -> localhost:${VNC_PORT}"
-websockify --web=/usr/share/novnc 0.0.0.0:${PORT} localhost:${VNC_PORT} &
+echo "Starting noVNC (WebSocket Proxy)..."
+# Alpine path differs from Debian
+websockify --web=/usr/share/webapps/novnc \
+           0.0.0.0:${PORT} localhost:${VNC_PORT} &
 
+sleep 3
 echo "Starting Chromium..."
-# Flags giảm tài nguyên:
-# - --no-sandbox: cần cho container không đặc quyền (chấp nhận trade-off bảo mật)
-# - --disable-dev-shm-usage: tránh /dev/shm nhỏ gây crash
-# - tắt GPU/extension/background noise
-# - có thể thêm --blink-settings=imagesEnabled=false để tắt ảnh (nếu chỉ “treo”)
+
+# Keep Chromium alive with auto-restart
 while true; do
-  chromium \
+  chromium-browser \
     --no-sandbox \
     --disable-dev-shm-usage \
     --disable-gpu \
+    --disable-software-rasterizer \
     --disable-extensions \
     --disable-background-networking \
     --disable-sync \
-    --metrics-recording-only \
+    --disable-translate \
+    --disable-features=TranslateUI,BackForwardCache \
     --no-first-run \
-    --disable-features=Translate,BackForwardCache,PreloadMediaEngagementData,MediaRouter \
-    about:blank || true
-  sleep 1
+    --no-default-browser-check \
+    --window-size=1024,576 \
+    about:blank 2>/dev/null || true
+  sleep 2
 done
 EOF
 
 RUN chmod +x /usr/local/bin/start-gui.sh
+
+# -------------------------------
+# Launch
+# -------------------------------
 CMD ["/usr/local/bin/start-gui.sh"]
