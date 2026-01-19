@@ -1,92 +1,93 @@
-# ===============================
-#   ALPINE + noVNC + Chromium
-#   Railway Ready (Fully Fixed)
-# ===============================
+# Alpine nhỏ, pull nhanh; lưu ý: RAM khi chạy Chromium vẫn là chính
 FROM alpine:3.19
 
-ENV TZ=Asia/Ho_Chi_Minh \
-    PORT=8080 \
-    DISPLAY=:99 \
-    VNC_PORT=5900
+ENV TZ=Asia/Ho_Chi_Minh
+ENV PORT=8080
 
-# -------------------------------
-# Install packages (single layer)
-# -------------------------------
-RUN apk add --no-cache \
-    ca-certificates tzdata bash curl \
-    xvfb x11vnc fluxbox dbus xauth xrandr \
-    font-noto chromium \
-    python3 py3-numpy && \
-    # Install websockify globally (bypass venv)
-    python3 -m ensurepip && \
-    pip3 install --break-system-packages websockify && \
-    # Download noVNC
-    curl -fsSL https://github.com/novnc/noVNC/archive/v1.4.0.tar.gz | \
-    tar xz -C /opt && \
-    mv /opt/noVNC-1.4.0 /opt/novnc && \
-    ln -sf /opt/novnc/vnc.html /opt/novnc/index.html && \
-    ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime && \
-    # Cleanup
-    rm -rf /var/cache/apk/* /root/.cache
+ENV DISPLAY=:99
+ENV VNC_PORT=5900
 
-# -------------------------------
-# Startup Script
-# -------------------------------
-RUN cat > /start.sh <<'SCRIPT'
-#!/bin/bash
-set -euo pipefail
+# Bật community repo (novnc/websockify/x11vnc/xvfb thường nằm ở community)
+RUN set -eux; \
+  ALPINE_VER="$(cut -d. -f1,2 /etc/alpine-release)"; \
+  echo "http://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/main" > /etc/apk/repositories; \
+  echo "http://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/community" >> /etc/apk/repositories; \
+  apk add --no-cache \
+    ca-certificates tzdata \
+    # X virtual framebuffer + WM
+    xvfb fluxbox \
+    # VNC server + noVNC/websockify
+    x11vnc novnc websockify \
+    # Browser
+    chromium \
+    # Fonts (tránh lỗi ô vuông)
+    ttf-dejavu fontconfig \
+  ; \
+  update-ca-certificates
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "🐧 Alpine VNC Container"
-echo "🌐 Access: http://localhost:${PORT}"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+# noVNC thường nằm ở /usr/share/novnc, tạo index.html cho tiện
+RUN ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html 2>/dev/null || true
 
-# Clean X11 locks
-rm -rf /tmp/.X* 2>/dev/null || true
+RUN cat > /usr/local/bin/start-gui.sh <<'EOF'
+#!/bin/sh
+set -eu
+
+echo "TZ=${TZ}"
+echo "PORT=${PORT}"
+echo "DISPLAY=${DISPLAY}"
+
+# Xvfb lock cleanup (an toàn khi restart)
+rm -f /tmp/.X99-lock 2>/dev/null || true
+rm -rf /tmp/.X11-unix/X99 2>/dev/null || true
 mkdir -p /tmp/.X11-unix
 
-# Start services
-echo "[1/5] Xvfb..."
-Xvfb ${DISPLAY} -screen 0 1280x720x16 -nolisten tcp -ac &
-sleep 2
+echo "Starting Xvfb..."
+# Hạ RAM: giảm resolution + 16-bit depth
+Xvfb "${DISPLAY}" -screen 0 1366x768x16 -nolisten tcp -ac &
+sleep 1
 
-echo "[2/5] Fluxbox..."
-fluxbox &
+echo "Starting window manager (fluxbox)..."
+fluxbox >/dev/null 2>&1 &
+sleep 1
 
-echo "[3/5] x11vnc..."
-x11vnc -display ${DISPLAY} -forever -shared \
-       -rfbport ${VNC_PORT} -nopw -quiet &
+echo "Starting VNC server..."
+x11vnc \
+  -display "${DISPLAY}" \
+  -forever -shared \
+  -rfbport "${VNC_PORT}" \
+  -nopw \
+  -noxrecord -noxfixes -noxdamage \
+  >/dev/null 2>&1 &
 
-echo "[4/5] websockify..."
-websockify --web=/opt/novnc 0.0.0.0:${PORT} localhost:${VNC_PORT} &
+echo "Starting noVNC on 0.0.0.0:${PORT} -> localhost:${VNC_PORT}"
+websockify --web=/usr/share/novnc "0.0.0.0:${PORT}" "localhost:${VNC_PORT}" >/dev/null 2>&1 &
 
-sleep 3
-echo "[5/5] Chromium..."
-
-# Keep browser alive
+echo "Starting Chromium (non-headless)..."
+# Mẹo giảm tài nguyên:
+# - renderer-process-limit=1: giới hạn renderer process
+# - tắt sync/extension/background networking
+# - tắt ảnh nếu chỉ cần điều khiển logic (bạn có thể bỏ dòng blink-settings nếu cần xem hình)
+# - user-data-dir đặt ở /tmp để tránh phình disk cache
 while true; do
-  chromium-browser \
+  chromium \
     --no-sandbox \
     --disable-dev-shm-usage \
     --disable-gpu \
-    --disable-software-rasterizer \
     --disable-extensions \
     --disable-background-networking \
     --disable-sync \
+    --metrics-recording-only \
     --no-first-run \
-    --window-size=1280,720 \
-    --user-data-dir=/tmp/chrome \
-    about:blank 2>/dev/null || true
-  sleep 2
+    --disable-features=Translate,BackForwardCache,PreloadMediaEngagementData,MediaRouter \
+    --renderer-process-limit=1 \
+    --disk-cache-size=1 \
+    --media-cache-size=1 \
+    --user-data-dir=/tmp/chrome-profile \
+    --blink-settings=imagesEnabled=false \
+    about:blank >/dev/null 2>&1 || true
+  sleep 1
 done
-SCRIPT
+EOF
 
-RUN chmod +x /start.sh
-
-# -------------------------------
-# Health check (optional)
-# -------------------------------
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s \
-  CMD curl -f http://localhost:${PORT} || exit 1
-
-CMD ["/start.sh"]
+RUN chmod +x /usr/local/bin/start-gui.sh
+CMD ["/usr/local/bin/start-gui.sh"]
